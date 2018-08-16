@@ -4,19 +4,25 @@
 @Date: 2018-08-16 10:43:55
 '''
 
+import pickle
+
+import numpy as np
 import tensorflow as tf
+
+from data_utils import BatchManager
 
 class TransR(object):
     
     def __init__(self):
-        self.size_of_relation = 256
-        self.size_of_entity = 128
+        self.size_of_relation = 100
+        self.size_of_entity = 100
 
         self.head_input_size = 10
         self.tail_input_size = 10
         self.relation_input_size = 10
 
-        self.init_model()
+        self.checkpoint_dir = "./models/"
+        self.checkpoint_path = "./models/transR.ckpt"
 
     def init_model(self):
         self.__placeholder()
@@ -119,38 +125,98 @@ class TransR(object):
         self.train_op = optimizer.apply_gradients(zip(clipped_gradients, params))
         self.saver = tf.train.Saver(tf.global_variables())
 
+    def step(self, batch, sess):
+        heads = [i[0] for i in batch]
+        tails = [i[1] for i in batch]
+        relations = [i[2] for i in batch]
+
+        feed = {
+            self.head_inputs:heads,
+            self.tail_inputs:tails,
+            self.relation_inputs:relations,
+            self.dropout:0.5
+        }
+        loss,_ = sess.run([self.loss, self.train_op], feed_dict=feed)
+        return loss
+
     def train(self):
+        batch_manager = BatchManager()
+        self.head_input_size = batch_manager.head_vocab_size
+        self.tail_input_size = batch_manager.tail_vocab_size
+        self.relation_input_size = batch_manager.relation_vocab_size
+        data_map = {
+            "head_size":self.head_input_size,
+            "tail_size":self.tail_input_size,
+            "relation_size":self.relation_input_size,
+            "head_vocab":batch_manager.head_vocab,
+            "tail_vocab":batch_manager.tail_vocab,
+            "relation_vocab":batch_manager.relation_vocab
+        }
+        f = open("models/data_map.pkl", "wb")
+        pickle.dump(data_map, f)
+        f.close()
+
+        self.init_model()
         with tf.Session() as sess:
-            sess.run(tf.global_variables_initializer())
-            heads = [[1], [3], [5]]
-            tails = [[1], [4], [6]]
-            relations = [[1], [2], [3]]
+            ckpt = tf.train.get_checkpoint_state(self.checkpoint_dir)
+            if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+                print("[->] restore model")
+                self.saver.restore(sess, ckpt.model_checkpoint_path)
+            else:
+                print("[->] no model, initializing")
+                sess.run(tf.global_variables_initializer())
 
             for i in range(200):
-                feed = {
-                    self.head_inputs:heads,
-                    self.tail_inputs:tails,
-                    self.relation_inputs:relations,
-                    self.dropout:0.5
-                }
-                loss,_ = sess.run([self.loss, self.train_op], feed_dict=feed)
-                print(loss)
+                print("epoch {}".format(i))
+                for batch in batch_manager.get_batch():
+                    loss = self.step(batch, sess)
+                    print("\tloss: {}".format(loss))
+                    self.saver.save(sess, self.checkpoint_path)
 
-            heads = [[1]] * 3
-            tails = [[1]] * 3
+    def predict_relations(self, head, tail):
+        f = open("models/data_map.pkl", "rb")
+        data_map = pickle.load(f)
+        f.close()
+        
+        self.head_vocab = data_map.get("head_vocab")
+        self.tail_vocab = data_map.get("tail_vocab")
+        self.relation_vocab = data_map.get("relation_vocab")
+
+        self.head_input_size = data_map.get("head_size")
+        self.tail_input_size = data_map.get("tail_size")
+        self.relation_input_size = data_map.get("relation_size")
+
+        self.init_model()
+
+        with tf.Session() as sess:
+            ckpt = tf.train.get_checkpoint_state(self.checkpoint_dir)
+            if ckpt and tf.train.checkpoint_exists(ckpt.model_checkpoint_path):
+                print("[->] restore model")
+                self.saver.restore(sess, ckpt.model_checkpoint_path)
+            else:
+                print("[->] no model, initializing")
+                sess.run(tf.global_variables_initializer())
+
+            relations = list(self.relation_vocab.keys())
+            relations_vec = [[self.relation_vocab.get(i)] for i in relations]
+
+            heads_vec = [[self.head_vocab.get(head, 0)]] * (self.relation_input_size - 1)
+            tails_vec = [[self.tail_vocab.get(tail, 0)]] * (self.relation_input_size - 1)
 
             feed = {
-                self.head_inputs:heads,
-                self.tail_inputs:tails,
-                self.relation_inputs:[[1], [2], [3]],
+                self.head_inputs:heads_vec,
+                self.tail_inputs:tails_vec,
+                self.relation_inputs:relations_vec,
                 self.dropout:1
             }
             logits = sess.run(self.logits, feed_dict=feed)
+            min_index = np.argmin(logits)
             print(logits)
-            print(sess.run(tf.argmin(logits)))
+            print("the relation between {} and {} is {}".format(
+                head, tail, relations[min_index]
+            ))
 
-
-
-
-tr = TransR()
-tr.train()
+if __name__ == "__main__":
+    tr = TransR()
+    tr.predict_relations("北京大学", "北京")
+    # tr.train()
